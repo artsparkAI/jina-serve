@@ -1,0 +1,26 @@
+# FAST BUILD: Jina Embeddings v4 vLLM Worker for RunPod Serverless
+#
+# Uses RunPod's pre-built vLLM image (saves ~15-20 min build time)
+# Get your Jina AI API key for free: https://jina.ai/?sui=apikey
+
+FROM runpod/worker-v1-vllm:stable-cuda12.1.0
+
+# Environment variables
+ENV MODEL_NAME="jinaai/jina-embeddings-v4-vllm-retrieval" \
+    MAX_MODEL_LEN=8192 \
+    GPU_MEMORY_UTILIZATION=0.9 \
+    DTYPE=float16 \
+    VLLM_USE_V1=0 \
+    PYTHONUNBUFFERED=1
+
+# Install only the additional dependencies we need
+RUN pip install --no-cache-dir Pillow requests
+
+# Copy source code
+COPY src/ /src/
+
+# Set working directory
+WORKDIR /src
+
+# Run the handler
+CMD ["python3", "-u", "handler.py"]

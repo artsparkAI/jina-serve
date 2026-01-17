@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.7
+# FULL OPTIMIZED BUILD: Jina Embeddings v4 vLLM Worker
+#
+# Build command:
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.full-optimized \
+#     --cache-to type=local,dest=/tmp/jina-cache,mode=max \
+#     --cache-from type=local,src=/tmp/jina-cache \
+#     -t jina-embeddings-v4-runpod .
+#
+# Get your Jina AI API key for free: https://jina.ai/?sui=apikey
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# All ENV in one layer
+ENV MODEL_NAME="jinaai/jina-embeddings-v4-vllm-retrieval" \
+    MAX_MODEL_LEN=8192 \
+    GPU_MEMORY_UTILIZATION=0.9 \
+    DTYPE=float16 \
+    HF_HOME=/runpod-volume/huggingface \
+    HF_HUB_CACHE=/runpod-volume/huggingface/hub \
+    VLLM_USE_V1=0 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_WARN_SCRIPT_LOCATION=1
+
+# System deps with apt cache mount (heredoc syntax - single layer)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    <<EOF
+set -ex
+apt-get update
+apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    git \
+    wget \
+    curl
+ln -sf /usr/bin/python3.11 /usr/bin/python3
+ln -sf /usr/bin/python3 /usr/bin/python
+EOF
+
+# Upgrade pip (cached)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install --upgrade pip setuptools wheel
+
+# Heavy dependencies first (cached layer, rarely changes)
+# PyTorch + vLLM in single layer with cache
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install vllm==0.8.5
+
+# Lighter deps (bind mount avoids COPY layer for requirements.txt)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
+    pip install -r /tmp/requirements.txt
+
+# Source code LAST (changes most often) with --link for speed
+COPY --link src/ /src/
+
+WORKDIR /src
+
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD python3 -c "import torch; print(torch.cuda.is_available())" || exit 1
+
+CMD ["python3", "-u", "handler.py"]

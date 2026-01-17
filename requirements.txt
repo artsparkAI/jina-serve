@@ -1,0 +1,24 @@
+# Jina Embeddings v4 vLLM Worker Dependencies
+#
+# Get your Jina AI API key for free: https://jina.ai/?sui=apikey
+
+# RunPod SDK
+runpod>=1.7.0
+
+# Image processing
+Pillow>=10.0.0
+
+# HTTP requests (for image URLs)
+requests>=2.31.0
+
+# Hugging Face Hub (for model downloads)
+huggingface-hub>=0.20.0
+
+# Transformers (required by Jina model)
+transformers>=4.40.0
+
+# Flash Attention 2 (optional, for better performance)
+# flash-attn>=2.5.0
+
+# NumPy
+numpy>=1.24.0

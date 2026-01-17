@@ -1,0 +1,124 @@
+# Build and push to GitHub Container Registry (ghcr.io)
+# Then deploy to RunPod Serverless
+#
+# Required secrets:
+#   RUNPOD_API_KEY - Your RunPod API key
+#
+# Get your Jina AI API key for free: https://jina.ai/?sui=apikey
+
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/jina-embeddings-v4
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to RunPod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          DOCKER_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        run: |
+          set -e
+
+          TEMPLATE_NAME="jina-embeddings-v4-template"
+          ENDPOINT_NAME="jina-embeddings-v4"
+          GPU_TYPE="AMPERE_24"
+
+          echo "Creating/updating RunPod template..."
+
+          # Delete existing template if exists
+          EXISTING_TEMPLATE=$(curl -s --request POST \
+            --header 'content-type: application/json' \
+            --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            --data '{"query": "query { myself { podTemplates { id name } } }"}' \
+            | jq -r ".data.myself.podTemplates[] | select(.name == \"${TEMPLATE_NAME}\") | .id" 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_TEMPLATE" ] && [ "$EXISTING_TEMPLATE" != "null" ]; then
+            echo "Deleting existing template: $EXISTING_TEMPLATE"
+            curl -s --request POST \
+              --header 'content-type: application/json' \
+              --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+              --data "{\"query\": \"mutation { deleteTemplate(templateName: \\\"${TEMPLATE_NAME}\\\") }\"}" > /dev/null
+            sleep 2
+          fi
+
+          # Create template
+          TEMPLATE_RESPONSE=$(curl -s --request POST \
+            --header 'content-type: application/json' \
+            --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            --data "{\"query\": \"mutation { saveTemplate(input: { containerDiskInGb: 20, imageName: \\\"${DOCKER_IMAGE}\\\", isServerless: true, name: \\\"${TEMPLATE_NAME}\\\", volumeInGb: 0 }) { id name } }\"}")
+
+          TEMPLATE_ID=$(echo "$TEMPLATE_RESPONSE" | jq -r '.data.saveTemplate.id')
+          echo "Template ID: $TEMPLATE_ID"
+
+          if [ -z "$TEMPLATE_ID" ] || [ "$TEMPLATE_ID" == "null" ]; then
+            echo "Failed to create template:"
+            echo "$TEMPLATE_RESPONSE"
+            exit 1
+          fi
+
+          # Check for existing endpoint
+          EXISTING_ENDPOINT=$(curl -s --request POST \
+            --header 'content-type: application/json' \
+            --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            --data '{"query": "query { myself { endpoints { id name } } }"}' \
+            | jq -r ".data.myself.endpoints[] | select(.name == \"${ENDPOINT_NAME}\") | .id" 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_ENDPOINT" ] && [ "$EXISTING_ENDPOINT" != "null" ]; then
+            echo "Updating existing endpoint: $EXISTING_ENDPOINT"
+            curl -s --request POST \
+              --header 'content-type: application/json' \
+              --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+              --data "{\"query\": \"mutation { saveEndpoint(input: { id: \\\"${EXISTING_ENDPOINT}\\\", templateId: \\\"${TEMPLATE_ID}\\\" }) { id } }\"}" > /dev/null
+            ENDPOINT_ID="$EXISTING_ENDPOINT"
+          else
+            echo "Creating new endpoint..."
+            ENDPOINT_RESPONSE=$(curl -s --request POST \
+              --header 'content-type: application/json' \
+              --url "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+              --data "{\"query\": \"mutation { saveEndpoint(input: { gpuIds: \\\"${GPU_TYPE}\\\", idleTimeout: 5, name: \\\"${ENDPOINT_NAME}\\\", scalerType: \\\"QUEUE_DELAY\\\", scalerValue: 4, templateId: \\\"${TEMPLATE_ID}\\\", workersMax: 3, workersMin: 0 }) { id name } }\"}")
+            ENDPOINT_ID=$(echo "$ENDPOINT_RESPONSE" | jq -r '.data.saveEndpoint.id')
+          fi
+
+          echo ""
+          echo "========================================="
+          echo "Deployment complete!"
+          echo "Endpoint ID: $ENDPOINT_ID"
+          echo "Endpoint URL: https://api.runpod.ai/v2/${ENDPOINT_ID}"
+          echo "========================================="
